@@ -63,18 +63,21 @@ def prepare_data(ip, port, path):
     
     if os.path.isfile(path):
         if path.endswith(accepted_extensions):
-            file_list.append("{0}{1}".format(url_prefix, quote(path)))
+            file_list.append("{0}{1}".format(url_prefix, quote(os.path.basename(path))))
             dir = os.path.dirname(path)
         else:
             print("{0}: Unsupported file extension.".format(path))
             exit(1)
     else:
-        file_list = ["{0}{1}".format(url_prefix, quote(file)) for file in os.listdir(path) if file.endswith(accepted_extensions)]
+        file_list = ["{0}{1}".format(url_prefix, quote(os.path.basename(file))) for file in os.listdir(path) if file.endswith(accepted_extensions)]
         dir = path
     
     if not file_list:
         print("No files to serve.")
         exit(1)
+    
+    if dir and dir != os.curdir:
+        os.chdir(dir)
     
     return "\n".join(file_list), "\n".join(file_list).encode("ascii")
     
@@ -122,9 +125,8 @@ server = MyServer(("", args.host_port), SimpleHTTPRequestHandler)
 thread = threading.Thread(target = server.serve_forever)
 thread.start()
 
+print("Sending URL(s) to {0} on port 5000...".format(args.target_ip))
 try:
-    print("Sending URL(s) to {0} on port 5000...".format(args.target_ip))
-    
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((args.target_ip, 5000))
     sock.sendall(struct.pack("!L", len(payload_bytes)) + payload_bytes)
@@ -134,10 +136,10 @@ try:
     
     sock.close()
 except Exception as e:
-    print("Error: {0!s}".format(e))
+    print("\nError: {0!s}".format(e))
     
     server.shutdown()
     exit(1)
 
-print("Sending complete: shutting down HTTP server...")
+print("\nOperations completed: shutting down HTTP server...")
 server.shutdown()
