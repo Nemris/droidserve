@@ -118,14 +118,15 @@ if not os.path.exists(args.path):
 print("Preparing data...\n")
 (payload, payload_bytes) = prepare_data(args.host_ip, args.host_port, args.path)
 
-print("URL(s):\n{0}\n".format(payload))
+padding = len("Destination:") + 2
+print("{0}{1}:{2!s}\n{3}{4}:5000\n{5}{6}".format("Source:".ljust(padding), args.host_ip, args.host_port, "Destination:".ljust(padding), args.target_ip, "URL(s):".ljust(padding), "".join([i + "\n" + " " * padding for i in payload.split("\n")])))
 
-print("Opening HTTP server on port {0!s}...".format(args.host_port))
+print("Opening HTTP server...")
 server = MyServer(("", args.host_port), SimpleHTTPRequestHandler)
 thread = threading.Thread(target = server.serve_forever)
 thread.start()
 
-print("Sending URL(s) to {0} on port 5000...".format(args.target_ip))
+#print("Sending URL(s) to {0} on port 5000...".format(args.target_ip))
 try:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((args.target_ip, 5000))
