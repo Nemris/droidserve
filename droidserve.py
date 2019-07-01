@@ -1,146 +1,130 @@
-# coding: utf-8 -*-
-
+""" Serve .cia, .tik, and .cetk files to FBI. """
 import argparse
+import http.server
 import os
-import signal
 import socket
+import socketserver
 import struct
-#import subprocess   # See line 44
 import sys
 import threading
 import time
+import urllib.request
 
-from http.server import SimpleHTTPRequestHandler
-from socketserver import TCPServer
-from urllib.parse import quote
 
-##########
-# Gracefully handles CTRL-C aborts
-def exit_gracefully(signal, frame):
-    print("\nAborting as per user request.")
-    
-    if sock:
-        sock.close()
-        server.shutdown()
-    
-    exit(1)
-
-##########
-
-class MyServer(TCPServer):
+class MyServer(socketserver.TCPServer):
+    """ Class to serve files to FBI. """
     def server_bind(self):
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind(self.server_address)
 
-# Determines the host's IP by querying Google's DNS
-def determine_host_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(("8.8.8.8", 80))
-    host = s.getsockname()[0]
-    s.close()
-    
-    return host
 
-# Experimental method to determine the host's IP if the access point has no Internet access
-# Already implemented, should there be a way to prevent the 3DS from disconnecting if the AP doesn't have Internet access
-#def fallback_host_ip():
-    #try:
-        #(out, err) = subprocess.Popen("ip r l", stdout = subprocess.PIPE, stderr = subprocess.PIPE, shell = True).communicate()
-    #except IndexError:
-        #host = ""
-    
-    #if not err:
-        #host = out.decode("utf-8").split(" ")[-2]
-    
-    #return host
+def exit_fatal(msg):
+    """ Print a message to stderr and exit with code 1. """
+    print("{0}".format(msg), file=sys.stderr)
+    exit(1)
 
-# Prepares a list of URL(s) from accepted link(s)
-# Returns a '\m'-separated string and an ASCII encoding of it
-def prepare_data(ip, port, path):
-    accepted_extensions = (".cia", ".tik", ".cetk")
-    url_prefix = "{0}:{1!s}/".format(ip, port)
-    file_list = []
-    
-    if os.path.isfile(path):
-        if path.endswith(accepted_extensions):
-            file_list.append("{0}{1}".format(url_prefix, quote(os.path.basename(path))))
-            dir = os.path.dirname(path)
-        else:
-            print("{0}: Unsupported file extension.".format(path))
-            exit(1)
+
+def local_ip():
+    """ Obtain the local IP address. """
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s: # pylint: disable=invalid-name
+        # https://stackoverflow.com/a/166589
+        s.connect(("8.8.8.8", 80))
+
+        return s.getsockname()[0] # local IP
+
+
+def is_valid_file(fname):
+    """ Check if fname is a .cia, .tik, or .cetk file. """
+    return fname.endswith((".cia", ".tik", ".cetk"))
+
+
+def assemble_urls(host, port, path, directory):
+    """ Assemble URLs to path or to its contents. """
+    urls = []
+
+    if directory:
+        for fname in os.listdir(path):
+            if is_valid_file(fname):
+                urls.append("{0}:{1}/{2}".format(host, port, urllib.request.quote(os.path.basename(
+                    fname))))
     else:
-        file_list = ["{0}{1}".format(url_prefix, quote(os.path.basename(file))) for file in os.listdir(path) if file.endswith(accepted_extensions)]
-        dir = path
-    
-    if not file_list:
-        print("No files to serve.")
-        exit(1)
-    
-    if dir and dir != os.curdir:
-        os.chdir(dir)
-    
-    return "\n".join(file_list), "\n".join(file_list).encode("ascii")
-    
+        urls.append("{0}:{1}/{2}".format(host, port, urllib.request.quote(os.path.basename(path))))
 
-##########
-# Commandline argument parser section
+    return urls
 
-ap = argparse.ArgumentParser(description = "Serve .cia, .tik or .cetk files to FBI.")
 
-ap.add_argument("target_ip", type = str, help = "IP address of the 3DS")
-ap.add_argument("path", type = str, help = "file or folder to serve")
-ap.add_argument("-i", "--host_ip", type = str, required = False, help = "IP of the sender")
-ap.add_argument("-p", "--host_port", type = int, required = False, default = 8080, help = "port of the sender")
+def serve_payload(directory, target, payload):
+    """ Serve payload to target. """
+    os.chdir(directory)
 
-args = ap.parse_args()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s: # pylint: disable=invalid-name
+        s.connect((target, 5000))
+        s.sendall(struct.pack("!L", len(payload)) + payload)
 
-##########
-# Handler to avoid printing a bunch of junk if the user aborts with CTRL-C
+        while not s.recv(1):
+            time.sleep(0.05)
 
-signal.signal(signal.SIGINT, exit_gracefully)
 
-##########
+def main(target, path, host, port):
+    """ Core function. """
+    if not host:
+        try:
+            host = local_ip()
+        except OSError as e: # pylint: disable=invalid-name
+            exit_fatal("Fatal: {0}.".format(e.strerror.lower()))
 
-if not args.host_ip:
-    args.host_ip = determine_host_ip()
-    
-    #if not args.host_ip:
-        #args.host_ip = fallback_host_ip()
-    
-    if not args.host_ip:
-        print("Fatal: no connection.")
-        exit(1)
+    payload_urls = assemble_urls(host, port, path, os.path.isdir(path))
+    if not payload_urls:
+        exit_fatal("Fatal: no file to send.")
 
-if not os.path.exists(args.path):
-    print("{0}: No such file or directory.".format(args.path))
-    exit(1)
+    payload = "\n".join(payload_urls).encode("ascii")
 
-print("Preparing data...\n")
-(payload, payload_bytes) = prepare_data(args.host_ip, args.host_port, args.path)
+    print("URLs:")
+    for url in payload_urls:
+        print("    {0}".format(url))
+    print()
 
-padding = len("Destination:") + 2
-print("{0}{1}:{2!s}\n{3}{4}:5000\n{5}{6}".format("Source:".ljust(padding), args.host_ip, args.host_port, "Destination:".ljust(padding), args.target_ip, "URL(s):".ljust(padding), "".join([i + "\n" + " " * padding for i in payload.split("\n")])))
+    with MyServer((host, port), http.server.SimpleHTTPRequestHandler) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
 
-print("Opening HTTP server...")
-server = MyServer(("", args.host_port), SimpleHTTPRequestHandler)
-thread = threading.Thread(target = server.serve_forever)
-thread.start()
+        try:
+            serve_payload(os.path.dirname(path), target, payload)
+        except ConnectionRefusedError:
+            exit_fatal("Fatal: 3DS not ready.")
+        except OSError as e: # pylint: disable=invalid-name
+            exit_fatal("Fatal: {0}.".format(e.strerror.lower()))
+        finally:
+            server.shutdown()
 
-#print("Sending URL(s) to {0} on port 5000...".format(args.target_ip))
-try:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((args.target_ip, 5000))
-    sock.sendall(struct.pack("!L", len(payload_bytes)) + payload_bytes)
-    
-    while len(sock.recv(1)) < 1:
-        time.sleep(0.05)
-    
-    sock.close()
-except Exception as e:
-    print("\nError: {0!s}".format(e))
-    
-    server.shutdown()
-    exit(1)
 
-print("\nOperations completed: shutting down HTTP server...")
-server.shutdown()
+if __name__ == "__main__":
+    AP = argparse.ArgumentParser(
+        description="Serve .cia, .tik, and .cetk files to FBI."
+    )
+
+    AP.add_argument(
+        "target",
+        type=str,
+        help="IP address of the target 3DS"
+    )
+    AP.add_argument(
+        "path",
+        type=str,
+        help="file or directory whose contwnts to serve"
+    )
+    AP.add_argument(
+        "--host",
+        type=str,
+        help="IP address of the sender"
+    )
+    AP.add_argument(
+        "--port",
+        default=8080,
+        type=int,
+        help="port of the sender"
+    )
+
+    ARGS = AP.parse_args()
+
+    main(ARGS.target, ARGS.path, ARGS.host, ARGS.port)
